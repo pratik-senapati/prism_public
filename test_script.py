@@ -4,7 +4,9 @@ import io
 import torch
 import numpy as np
 from transformers import CLIPProcessor, CLIPModel
+from sklearn.decomposition import PCA
 import asyncio
+from scipy.spatial.distance import euclidean, cityblock
 
 # Load the CLIP model and processor
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -28,16 +30,8 @@ def categorize_score(score):
     else:
         return "Very Poor"
 
-def normalize_score(cosine_similarity_score):
-    # Define the range of cosine similarity scores and the corresponding range of normalized scores
-    min_cosine = 0.1
-    max_cosine = 0.35
-    min_normalized = 100
-    max_normalized = 1000
-    
-    # Apply linear transformation
-    normalized_score = ((cosine_similarity_score - min_cosine) / (max_cosine - min_cosine)) * (max_normalized - min_normalized) + min_normalized
-    return normalized_score
+def normalize_score(value, min_value, max_value, scale_min=0, scale_max=1000):
+    return ((value - min_value) / (max_value - min_value)) * (scale_max - scale_min) + scale_min
 
 async def test_compare_image_caption():
     # Load an image
@@ -59,7 +53,7 @@ async def test_compare_image_caption():
     image = Image.fromarray((image_np * 255).astype(np.uint8))
     
     # Use a placeholder caption
-    placeholder_caption = "Experience the tranquility of the countryside through this captivating artwork that brings to life the charm of farm animals in their natural habitat."
+    placeholder_caption = "a photo of a cat and dogs and birds and farm animals like cows and pigs and sheep in a barn on a sunny day"
     
     # Preprocess the image and text with padding
     inputs = clip_processor(text=[placeholder_caption], images=image, return_tensors="pt", padding=True)
@@ -74,19 +68,42 @@ async def test_compare_image_caption():
     image_features = torch.nn.functional.normalize(image_features, p=2, dim=1)
     text_features = torch.nn.functional.normalize(text_features, p=2, dim=1)
     
+    # Flatten the tensors for distance calculations
+    reduced_image_features_flat = image_features.flatten().numpy()
+    reduced_text_features_flat = text_features.flatten().numpy()
+    
     # Calculate cosine similarity
     cosine_similarity_score = torch.nn.functional.cosine_similarity(image_features, text_features).item()
     
-    # Normalize the score to a scale of 100 to 1000
-    normalized_score = normalize_score(cosine_similarity_score)
+    # Calculate Euclidean distance
+    euclidean_distance_score = euclidean(reduced_image_features_flat, reduced_text_features_flat)
+    
+    # Calculate Manhattan distance
+    manhattan_distance_score = cityblock(reduced_image_features_flat, reduced_text_features_flat)
+    
+    # Calculate dot product
+    dot_product_score = torch.dot(image_features.squeeze(), text_features.squeeze()).item()
+    
+    # Normalize the scores to a scale of 0 to 1000
+    cosine_similarity_score_normalized = normalize_score(cosine_similarity_score, -1, 1, 0, 1000)
+    euclidean_distance_score_normalized = normalize_score(euclidean_distance_score, 0, 10, 0, 1000)  # Adjust max distance based on your data
+    manhattan_distance_score_normalized = normalize_score(manhattan_distance_score, 0, 50, 0, 1000)  # Adjust max distance based on your data
+    dot_product_score_normalized = normalize_score(dot_product_score, -1, 1, 0, 1000)
     
     # Categorize the score
-    category = categorize_score(normalized_score)
+    category = categorize_score(cosine_similarity_score_normalized)
     
     print({
         "placeholder_caption": placeholder_caption,
         "cosine_similarity_score": cosine_similarity_score,
-        "normalized_score": normalized_score,
+        "cosine_similarity_score_normalized": cosine_similarity_score_normalized,
+        "euclidean_distance_score": euclidean_distance_score,
+        "euclidean_distance_score_normalized": euclidean_distance_score_normalized,
+        "manhattan_distance_score": manhattan_distance_score,
+        "manhattan_distance_score_normalized": manhattan_distance_score_normalized,
+        "dot_product_score": dot_product_score,
+        "dot_product_score_normalized": dot_product_score_normalized,
+        "normalized_score": cosine_similarity_score_normalized,
         "category": category
     })
 

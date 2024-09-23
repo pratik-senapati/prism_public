@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Image-Caption Similarity</title>
+</head>
+<body>
+    <h1>Test Image-Caption Similarity</h1>
+    <form action="http://localhost:8000/compare" method="post" enctype="multipart/form-data">
+        <label for="image">Select image:</label>
+        <input type="file" id="image" name="image" accept="image/*" required><br><br>
+        <label for="caption">Enter caption:</label>
+        <input type="text" id="caption" name="caption" required><br><br>
+        <input type="submit" value="Submit">
+    </form>
+</body>
+</html>
