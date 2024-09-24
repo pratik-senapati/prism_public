@@ -1,12 +1,20 @@
+from flask import Flask, request, jsonify, render_template
 import torch
 from PIL import Image
 import numpy as np
 from transformers import CLIPProcessor, CLIPModel
 from chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
+import os
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+
+# Ensure the upload folder exists
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Set random seed for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
+torch.manual_seed(21)
+np.random.seed(21)
 
 # Load the CLIP model and processor
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -15,92 +23,96 @@ clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 # Initialize the CHAN model
 chan_model = CrossModalHierarchicalAttentionNetwork(dim=512, heads=8)  # Using 512 dimensions
 
-# Define the path to the sample image and caption
-image_path = "image.jpg"
-accurate_caption = "Embracing the elegance of simplicity, this image captures the essence of serene beauty. 🌿 #EleganceInSimplicity"
-inaccurate_caption = "Several men and women dancing on a stage with bright lights and colorful costumes."
-
 # Function to extract features using CLIP
-def extract_features(image_path, caption):
-    # Load and preprocess the image
+def extract_features(image_path, caption, max_length=77):
     image = Image.open(image_path).convert("RGB")
     image = image.resize((224, 224))
     image_np = np.array(image).astype(np.float32) / 255.0
 
-    # Ensure the image is a 3D array (height, width, channels)
     if image_np.ndim == 2:
         image_np = np.stack([image_np] * 3, axis=-1)
     elif image_np.shape[2] == 4:
         image_np = image_np[..., :3]
 
-    # Convert numpy array back to PIL Image
     image = Image.fromarray((image_np * 255).astype(np.uint8))
-
-    # Extract features using CLIP
-    inputs = clip_processor(text=[caption], images=image, return_tensors="pt", padding=True)
+    inputs = clip_processor(text=[caption], images=image, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
 
     with torch.no_grad():
         outputs = clip_model(**inputs)
         image_features = outputs.image_embeds
         text_features = outputs.text_embeds
 
-    # Normalize features
     image_features = torch.nn.functional.normalize(image_features, p=2, dim=1)
     text_features = torch.nn.functional.normalize(text_features, p=2, dim=1)
 
     return image_features, text_features
 
-# Extract features for accurate and inaccurate captions
-image_features_accurate, text_features_accurate = extract_features(image_path, accurate_caption)
-image_features_inaccurate, text_features_inaccurate = extract_features(image_path, inaccurate_caption)
+# Function to compute similarity
+def compute_similarity(image_features, text_features):
+    cosine_similarity = torch.nn.functional.cosine_similarity(image_features, text_features, dim=-1)
+    return cosine_similarity.item()
 
-# Ensure the features have the correct dimensions
-def ensure_correct_dimensions(features, target_dim):
-    if features.shape[-1] != target_dim:
-        features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(0), target_dim).squeeze(0)
-    return features
+# Function to normalize and scale scores
+def normalize_and_scale(score, avg, std, scale_factor=1000):
+    normalized_score = (score - avg) / std
+    scaled_score = (normalized_score + 3) / 6 * scale_factor  # Assuming a range of -3 to 3 for normalized scores
+    return max(0, min(scaled_score, scale_factor))
 
-image_features_accurate = ensure_correct_dimensions(image_features_accurate, 512)
-text_features_accurate = ensure_correct_dimensions(text_features_accurate, 512)
-image_features_inaccurate = ensure_correct_dimensions(image_features_inaccurate, 512)
-text_features_inaccurate = ensure_correct_dimensions(text_features_inaccurate, 512)
+# Function to determine grade based on scaled score
+def determine_grade(scaled_score):
+    if scaled_score >= 900:
+        return "A"
+    elif scaled_score >= 800:
+        return "B"
+    elif scaled_score >= 700:
+        return "C"
+    elif scaled_score >= 600:
+        return "D"
+    else:
+        return "F"
 
-# Function to apply CHAN and compute similarity
-def compute_similarity_with_chan(image_features, text_features, alpha=1.0, c=1.0, d=3):
-    # Ensure the features have the same dimension
-    image_features = image_features.view(1, -1, 512)  # Reshape if necessary
-    text_features = text_features.view(1, -1, 512)  # Reshape if necessary
+# Define average and standard deviation for polynomial similarities
+avg_poly_similarity = 2.3241
+std_poly_similarity = 0.2892
 
-    # Apply CHAN
-    img_attended, text_attended = chan_model(image_features, text_features)
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-    # Compute cosine similarity
-    cosine_similarity = torch.nn.functional.cosine_similarity(img_attended, text_attended, dim=-1)
-    
-    # Compute polynomial kernel similarity
-    poly_similarity = (alpha * cosine_similarity + c) ** d
-    
-    return cosine_similarity.item(), poly_similarity.item()
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
 
-# Function to scale similarity scores to a range from 0 to 1000 with exponential transformation
-def scale_score(score, scale_factor=1000):
-    return (torch.exp(torch.tensor(score)) - 1) / (torch.exp(torch.tensor(1.0)) - 1) * scale_factor
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
 
-# Compute similarities
-cosine_similarity_accurate, poly_similarity_accurate = compute_similarity_with_chan(image_features_accurate, text_features_accurate)
-cosine_similarity_inaccurate, poly_similarity_inaccurate = compute_similarity_with_chan(image_features_inaccurate, text_features_inaccurate)
+    image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_file.filename)
+    image_file.save(image_path)
 
-# Scale the similarities
-scaled_cosine_similarity_accurate = scale_score(cosine_similarity_accurate)
-scaled_poly_similarity_accurate = scale_score(poly_similarity_accurate)
-scaled_cosine_similarity_inaccurate = scale_score(cosine_similarity_inaccurate)
-scaled_poly_similarity_inaccurate = scale_score(poly_similarity_inaccurate)
+    caption = request.form['caption']
 
-print("Cosine Similarity with CHAN (Accurate Caption):", cosine_similarity_accurate)
-print("Scaled Cosine Similarity with CHAN (Accurate Caption):", scaled_cosine_similarity_accurate.item())
-print("Polynomial Kernel Similarity with CHAN (Accurate Caption):", poly_similarity_accurate)
-print("Scaled Polynomial Kernel Similarity with CHAN (Accurate Caption):", scaled_poly_similarity_accurate.item())
-print("Cosine Similarity with CHAN (Inaccurate Caption):", cosine_similarity_inaccurate)
-print("Scaled Cosine Similarity with CHAN (Inaccurate Caption):", scaled_cosine_similarity_inaccurate.item())
-print("Polynomial Kernel Similarity with CHAN (Inaccurate Caption):", poly_similarity_inaccurate)
-print("Scaled Polynomial Kernel Similarity with CHAN (Inaccurate Caption):", scaled_poly_similarity_inaccurate.item())
+    # Extract features
+    image_features, text_features = extract_features(image_path, caption)
+
+    # Compute similarities
+    cosine_similarity = compute_similarity(image_features, text_features)
+    poly_similarity = (cosine_similarity * 2 + 1) ** 3  # Example polynomial similarity calculation
+
+    # Normalize and scale similarities
+    scaled_poly_similarity = normalize_and_scale(poly_similarity, avg_poly_similarity, std_poly_similarity)
+
+    # Determine grade
+    grade = determine_grade(scaled_poly_similarity)
+
+    result = {
+        'poly_similarity': poly_similarity,
+        'scaled_poly_similarity': scaled_poly_similarity,
+        'grade': grade
+    }
+
+    return jsonify(result)
+
+if __name__ == '__main__':
+    app.run(debug=True)
