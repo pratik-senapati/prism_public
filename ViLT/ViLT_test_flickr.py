@@ -2,44 +2,37 @@ import torch
 from PIL import Image
 import numpy as np
 import json
-from transformers import CLIPProcessor, CLIPModel
-from chan_test.chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
+from transformers import ViltProcessor, ViltModel
 from tqdm import tqdm  # For progress bar
+import csv
+
+# Import the simplified CHAN model
+from chan_test.chan import CrossModalHierarchicalAttentionNetwork
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
 
-# Load the CLIP model and processor
-clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+# Load the ViLT model and processor
+vilt_model = ViltModel.from_pretrained("dandelin/vilt-b32-mlm")
+vilt_processor = ViltProcessor.from_pretrained("dandelin/vilt-b32-mlm")
 
 # Initialize the CHAN model
-chan_model = CrossModalHierarchicalAttentionNetwork(dim=512, heads=8)  # Using 512 dimensions
+chan_model = CrossModalHierarchicalAttentionNetwork(dim=768, heads=8)  # Adjust dimensions as needed
 
-# Function to extract features using CLIP
+# Function to extract features using ViLT
 def extract_features(image_path, caption):
     # Load and preprocess the image
     image = Image.open(image_path).convert("RGB")
-    image = image.resize((224, 224))
-    image_np = np.array(image).astype(np.float32) / 255.0
-
-    # Ensure the image is a 3D array (height, width, channels)
-    if image_np.ndim == 2:
-        image_np = np.stack([image_np] * 3, axis=-1)
-    elif image_np.shape[2] == 4:
-        image_np = image_np[..., :3]
-
-    # Convert numpy array back to PIL Image
-    image = Image.fromarray((image_np * 255).astype(np.uint8))
-
-    # Extract features using CLIP
-    inputs = clip_processor(text=[caption], images=image, return_tensors="pt", padding=True)
+    inputs = vilt_processor(text=[caption], images=image, return_tensors="pt", padding=True)
 
     with torch.no_grad():
-        outputs = clip_model(**inputs)
-        image_features = outputs.image_embeds
-        text_features = outputs.text_embeds
+        outputs = vilt_model(**inputs)
+        embeddings = outputs.last_hidden_state
+
+    # Separate image and text embeddings
+    image_features = embeddings[:, :inputs['pixel_values'].shape[1], :]
+    text_features = embeddings[:, inputs['pixel_values'].shape[1]:, :]
 
     # Normalize features
     image_features = torch.nn.functional.normalize(image_features, p=2, dim=1)
@@ -47,17 +40,19 @@ def extract_features(image_path, caption):
 
     return image_features, text_features
 
-# Ensure the features have the correct dimensions
-def ensure_correct_dimensions(features, target_dim):
-    if features.shape[-1] != target_dim:
-        features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(0), target_dim).squeeze(0)
-    return features
-
 # Function to apply CHAN and compute similarity
 def compute_similarity_with_chan(image_features, text_features, alpha=1.0, c=1.0, d=3):
     # Ensure the features have the same dimension
-    image_features = image_features.view(1, -1, 512)  # Reshape if necessary
-    text_features = text_features.view(1, -1, 512)  # Reshape if necessary
+    image_features = image_features.view(-1, image_features.shape[-1])
+    text_features = text_features.view(-1, text_features.shape[-1])
+
+    # Ensure the number of heads and the feature dimensions are compatible
+    num_heads = chan_model.attn.num_heads
+    head_dim = chan_model.attn.head_dim
+
+    # Reshape to (batch_size, seq_length, num_heads * head_dim)
+    image_features = image_features.view(1, -1, num_heads * head_dim)
+    text_features = text_features.view(1, -1, num_heads * head_dim)
 
     # Apply CHAN
     img_attended, text_attended = chan_model(image_features, text_features)
@@ -69,6 +64,10 @@ def compute_similarity_with_chan(image_features, text_features, alpha=1.0, c=1.0
     poly_similarity = (alpha * cosine_similarity + c) ** d
     
     return cosine_similarity.item(), poly_similarity.item()
+
+# Function to compute polynomial similarity
+def compute_polynomial_similarity(cosine_similarity, alpha=1.0, c=1.0, d=3):
+    return (alpha * cosine_similarity + c) ** d
 
 # Function to scale similarity scores to a range from 0 to 1000 with exponential transformation
 def scale_score(score, scale_factor=1000):
@@ -83,10 +82,10 @@ def load_flickr8k_test_data(test_images_file, captions_file):
     # Load captions
     captions = {}
     with open(captions_file, 'r') as f:
-        for line in f:
-            parts = line.strip().split('\t')
-            if len(parts) == 2:
-                filename, caption = parts
+        reader = csv.reader(f, delimiter='\t')
+        for row in reader:
+            if len(row) == 2:
+                filename, caption = row
                 filename = filename.split('#')[0]
                 if filename in test_images:
                     if filename not in captions:
@@ -108,13 +107,19 @@ def process_flickr8k_test_data(test_images_file, captions_file, output_file):
 
     for image_path, caption in tqdm(test_data, desc="Processing Flickr8k Test Data"):
         image_features, text_features = extract_features(image_path, caption)
-        image_features = ensure_correct_dimensions(image_features, 512)
-        text_features = ensure_correct_dimensions(text_features, 512)
         
-        cosine_similarity, poly_similarity = compute_similarity_with_chan(image_features, text_features)
+        # Compute similarities using ViLT
+        cosine_similarity = torch.nn.functional.cosine_similarity(image_features.mean(dim=1), text_features.mean(dim=1), dim=-1).item()
+        poly_similarity = compute_polynomial_similarity(cosine_similarity)
         
         scaled_cosine_similarity = scale_score(cosine_similarity).item()
         scaled_poly_similarity = scale_score(poly_similarity).item()
+        
+        # Compute similarities using ViLT with CHAN
+        chan_cosine_similarity, chan_poly_similarity = compute_similarity_with_chan(image_features, text_features)
+        
+        scaled_chan_cosine_similarity = scale_score(chan_cosine_similarity).item()
+        scaled_chan_poly_similarity = scale_score(chan_poly_similarity).item()
         
         results.append({
             'image_path': image_path,
@@ -122,7 +127,11 @@ def process_flickr8k_test_data(test_images_file, captions_file, output_file):
             'cosine_similarity': cosine_similarity,
             'scaled_cosine_similarity': scaled_cosine_similarity,
             'poly_similarity': poly_similarity,
-            'scaled_poly_similarity': scaled_poly_similarity
+            'scaled_poly_similarity': scaled_poly_similarity,
+            'chan_cosine_similarity': chan_cosine_similarity,
+            'scaled_chan_cosine_similarity': scaled_chan_cosine_similarity,
+            'chan_poly_similarity': chan_poly_similarity,
+            'scaled_chan_poly_similarity': scaled_chan_poly_similarity
         })
     
     with open(output_file, 'w') as f:
@@ -132,7 +141,7 @@ def process_flickr8k_test_data(test_images_file, captions_file, output_file):
 flickr_images_dir = "C:/Users/Pratik Senapati/Downloads/Flickr8k_Dataset/Flicker8k_Dataset"
 flickr_captions_file = "C:/Users/Pratik Senapati/Downloads/Flickr8k_text/Flickr8k.token.txt"
 test_images_file = "C:/Users/Pratik Senapati/Downloads/Flickr8k_text/Flickr_8k.testImages.txt"
-output_file = "flickr8k_test_results.json"
+output_file = "flickr8k_test_results_vilt_chan.json"
 
 # Process the dataset and store results
 process_flickr8k_test_data(test_images_file, flickr_captions_file, output_file)

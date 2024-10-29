@@ -3,18 +3,22 @@ import torch
 from PIL import Image
 import numpy as np
 from transformers import CLIPProcessor, CLIPModel
-from chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
+from chan_test.chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
 import os
+import zipfile
+import json
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['EXTRACT_FOLDER'] = 'extracted'
 
-# Ensure the upload folder exists
+# Ensure the upload and extract folders exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['EXTRACT_FOLDER'], exist_ok=True)
 
 # Set random seed for reproducibility
-torch.manual_seed(21)
-np.random.seed(21)
+torch.manual_seed(42)
+np.random.seed(42)
 
 # Load the CLIP model and processor
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -77,42 +81,57 @@ std_poly_similarity = 0.2892
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index_zip.html')
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+    if 'zipfile' not in request.files:
+        return jsonify({'error': 'No zip file provided'}), 400
 
-    image_file = request.files['image']
-    if image_file.filename == '':
+    zip_file = request.files['zipfile']
+    if zip_file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
 
-    image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_file.filename)
-    image_file.save(image_path)
+    zip_path = os.path.join(app.config['UPLOAD_FOLDER'], zip_file.filename)
+    zip_file.save(zip_path)
 
-    caption = request.form['caption']
+    # Extract the zip file
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(app.config['EXTRACT_FOLDER'])
 
-    # Extract features
-    image_features, text_features = extract_features(image_path, caption)
+    # Load the captions from the JSON file
+    captions_path = os.path.join(app.config['EXTRACT_FOLDER'], 'captions.json')
+    with open(captions_path, 'r') as f:
+        captions = json.load(f)
 
-    # Compute similarities
-    cosine_similarity = compute_similarity(image_features, text_features)
-    poly_similarity = (cosine_similarity * 2 + 1) ** 3  # Example polynomial similarity calculation
+    results = []
 
-    # Normalize and scale similarities
-    scaled_poly_similarity = normalize_and_scale(poly_similarity, avg_poly_similarity, std_poly_similarity)
+    # Process each image and its corresponding caption
+    for image_name, caption in captions.items():
+        image_path = os.path.join(app.config['EXTRACT_FOLDER'], 'images', image_name)
 
-    # Determine grade
-    grade = determine_grade(scaled_poly_similarity)
+        # Extract features
+        image_features, text_features = extract_features(image_path, caption)
 
-    result = {
-        'poly_similarity': poly_similarity,
-        'scaled_poly_similarity': scaled_poly_similarity,
-        'grade': grade
-    }
+        # Compute similarities
+        cosine_similarity = compute_similarity(image_features, text_features)
+        poly_similarity = (cosine_similarity * 2 + 1) ** 3  # Example polynomial similarity calculation
 
-    return jsonify(result)
+        # Normalize and scale similarities
+        scaled_poly_similarity = normalize_and_scale(poly_similarity, avg_poly_similarity, std_poly_similarity)
+
+        # Determine grade
+        grade = determine_grade(scaled_poly_similarity)
+
+        results.append({
+            'image': image_name,
+            'caption': caption,
+            'poly_similarity': poly_similarity,
+            'scaled_poly_similarity': scaled_poly_similarity,
+            'grade': grade
+        })
+
+    return jsonify(results)
 
 if __name__ == '__main__':
     app.run(debug=True)

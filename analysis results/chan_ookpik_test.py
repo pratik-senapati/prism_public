@@ -3,7 +3,7 @@ from PIL import Image
 import numpy as np
 import json
 from transformers import CLIPProcessor, CLIPModel
-from chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
+from chan_test.chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
 from tqdm import tqdm  # For progress bar
 import os
 
