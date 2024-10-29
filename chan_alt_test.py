@@ -3,7 +3,7 @@ import torch
 from PIL import Image
 import numpy as np
 from transformers import CLIPProcessor, CLIPModel
-from chan_test.chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
+from chan import CrossModalHierarchicalAttentionNetwork  # Import the simplified CHAN model
 import os
 
 app = Flask(__name__)
@@ -24,24 +24,35 @@ clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 chan_model = CrossModalHierarchicalAttentionNetwork(dim=512, heads=8)  # Using 512 dimensions
 
 # Function to extract features using CLIP
-def extract_features(image_path, caption, max_length=77):
+def extract_features(image_path, caption):
+    # Load and preprocess the image
     image = Image.open(image_path).convert("RGB")
     image = image.resize((224, 224))
     image_np = np.array(image).astype(np.float32) / 255.0
 
+    # Ensure the image is a 3D array (height, width, channels)
     if image_np.ndim == 2:
         image_np = np.stack([image_np] * 3, axis=-1)
     elif image_np.shape[2] == 4:
         image_np = image_np[..., :3]
 
+    # Convert numpy array back to PIL Image
     image = Image.fromarray((image_np * 255).astype(np.uint8))
-    inputs = clip_processor(text=[caption], images=image, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
 
+    # Extract image features using CLIP
+    image_inputs = clip_processor(images=image, return_tensors="pt", padding=True)
     with torch.no_grad():
-        outputs = clip_model(**inputs)
-        image_features = outputs.image_embeds
-        text_features = outputs.text_embeds
+        image_outputs = clip_model(**image_inputs)
+        image_features = image_outputs.image_embeds
 
+    # Extract text features using CLIP
+    text_inputs = clip_processor(text=caption, return_tensors="pt", padding=True)
+    input_ids = text_inputs['input_ids']
+    with torch.no_grad():
+        text_outputs = clip_model(input_ids=input_ids)
+        text_features = text_outputs.text_embeds
+
+    # Normalize features
     image_features = torch.nn.functional.normalize(image_features, p=2, dim=1)
     text_features = torch.nn.functional.normalize(text_features, p=2, dim=1)
 

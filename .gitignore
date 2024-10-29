@@ -130,3 +130,6 @@ dmypy.json
 .pyre/
 
 /CHAN
+
+Flickr8k_Dataset/
+Flickr8k_text/
